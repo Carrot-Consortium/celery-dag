@@ -4,6 +4,7 @@ from celery.utils.objects import getitem_property
 from kombu.utils.uuid import uuid
 from celery.app.task import Context
 from celery.backends.redis import RedisBackend
+from celery.backends.base import Backend
 
 
 class MyTask(Task):
@@ -63,16 +64,12 @@ class MyTask(Task):
             else:
                 end_sig = sig
 
-            end_sig.options.setdefault("group_ids", self.request.properties["group_ids"])
-            end_sig.options.setdefault("group_indexes", self.request.properties["group_indexes"])
             end_sig.options.setdefault("chord", self.request.chord)
 
         return super().on_replace(sig)
 
     def retry(self, args=None, kwargs=None, **options):
-        if isinstance(self.request.chord, list):      
-            options.setdefault("group_ids", self.request.properties["group_ids"])
-            options.setdefault("group_indexes", self.request.properties["group_indexes"])
+        if isinstance(self.request.chord, list):
             options.setdefault("chord", self.request.chord)
 
         return super().retry(args=args, kwargs=kwargs, **options)
@@ -106,11 +103,7 @@ orig_ocpr = RedisBackend.on_chord_part_return
 def new_ocpr(self, request, state, result, propagate=None, **kwargs):
     properties = request.properties or request.options
     if isinstance(request.chord, list):
-        for group, group_index, chord in zip(
-            properties["group_ids"],
-            properties["group_indexes"],
-            request.chord,
-        ):
+        for group, group_index, chord, _ in zip(*request.chord):
             new_request = Context(request.__dict__)       
             new_request.group = group
             new_request.group_index = group_index         
@@ -121,6 +114,29 @@ def new_ocpr(self, request, state, result, propagate=None, **kwargs):
 
 
 RedisBackend.on_chord_part_return = new_ocpr
+
+
+orig_ocpr2 = Backend.on_chord_part_return
+
+
+def new_ocpr2(self, request, state, result, **kwargs):
+    if isinstance(request.chord, list):
+        for group, group_index, chord, siblings in zip(*request.chord):
+            if 0 == siblings.index(request.id):
+                self.fallback_chord_unlock(
+                    GroupResult(
+                        id=group,
+                        results=[
+                            AsyncResult(sibling) for sibling in siblings if sibling is not None
+                        ],
+                    ),
+                    maybe_signature(chord),
+                )
+    else:
+        orig_ocpr2(self, request, state, result, **kwargs)
+
+
+Backend.on_chord_part_return = new_ocpr2
 
 
 @Signature.register_type(name="workflow")
@@ -198,14 +214,22 @@ class workflow(Signature):
                 kwarg_map[parent_idx] = idx
                 parent_sig = self.nodes[parent_idx]           
                 if isinstance(parent_sig, workflow):          
-                    output_sig = parent_sig.nodes[-1]             
-                    output_sig.options.setdefault("group_ids", []).append(group_id)
-                    output_sig.options.setdefault("group_indexes", []).append(idx)
-                    output_sig.options.setdefault("chord", []).append(node_sig)
+                    output_sig = parent_sig.nodes[-1]
                 else:
-                    parent_sig.options.setdefault("group_ids", []).append(group_id)
-                    parent_sig.options.setdefault("group_indexes", []).append(idx)
-                    parent_sig.options.setdefault("chord", []).append(node_sig)
+                    output_sig = parent_sig
+                output_sig.options.setdefault("chord", [[], [], [], []])[0].append(group_id)
+                output_sig.options.setdefault("chord", [[], [], [], []])[1].append(idx)
+                output_sig.options.setdefault("chord", [[], [], [], []])[2].append(node_sig)
+                output_sig.options.setdefault("chord", [[], [], [], []])[3].append(
+                    [
+                        (
+                            t.nodes[-1].id
+                            if isinstance(t, workflow)
+                            else t.body.id if getattr(t, "tasks", None) else t.id
+                        )
+                        for t in header_tasks
+                    ]
+                )
             if not node_sig.immutable and any(p for p in parents.keys() if p is not None):
                 kwarg_mapping = {
                     kwarg: (
