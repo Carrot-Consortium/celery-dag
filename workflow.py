@@ -121,13 +121,13 @@ orig_ocpr2 = Backend.on_chord_part_return
 
 def new_ocpr2(self, request, state, result, **kwargs):
     if isinstance(request.chord, list):
-        for group, group_index, chord, siblings in zip(*request.chord):
-            if 0 == siblings.index(request.id):
+        for group, group_index, chord, parents in zip(*request.chord):
+            if 0 == parents.index(request.id):
                 self.fallback_chord_unlock(
                     GroupResult(
                         id=group,
                         results=[
-                            AsyncResult(sibling) for sibling in siblings if sibling is not None
+                            AsyncResult(parent) for parent in parents if parent is not None
                         ],
                     ),
                     maybe_signature(chord),
@@ -217,10 +217,11 @@ class workflow(Signature):
                     output_sig = parent_sig.nodes[-1]
                 else:
                     output_sig = parent_sig
-                output_sig.options.setdefault("chord", [[], [], [], []])[0].append(group_id)
-                output_sig.options.setdefault("chord", [[], [], [], []])[1].append(idx)
-                output_sig.options.setdefault("chord", [[], [], [], []])[2].append(node_sig)
-                output_sig.options.setdefault("chord", [[], [], [], []])[3].append(
+                output_sig.options.setdefault("chord", [[], [], [], []])
+                output_sig.options["chord"][0].append(group_id)
+                output_sig.options["chord"][1].append(idx)    
+                output_sig.options["chord"][2].append(node_sig)
+                output_sig.options["chord"][3].append(
                     [
                         (
                             t.nodes[-1].id
